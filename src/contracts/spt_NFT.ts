@@ -10,6 +10,7 @@ import {
     SigHash,
     ByteString,
     hash256,
+    Ripemd160,
 } from 'scrypt-ts'
 
 export class SptNft extends SmartContract {
@@ -19,14 +20,22 @@ export class SptNft extends SmartContract {
     @prop(true)
     redemptionPubKeyHash: PubKeyHash
 
-    constructor(ownerPkh: PubKeyHash, redemptionPkh: PubKeyHash) {
+    @prop(true)
+    isTransferrable: boolean
+
+    constructor(
+        ownerPkh: PubKeyHash,
+        redemptionPkh: PubKeyHash,
+        transferrable: boolean
+    ) {
         super(...arguments)
         this.ownerPkh = ownerPkh
         this.redemptionPubKeyHash = redemptionPkh
+        this.isTransferrable = transferrable
     }
 
     @method(SigHash.SINGLE)
-    public transfer(ownerSig: Sig, currentOwner: PubKey) {
+    public transfer(ownerSig: Sig, currentOwner: PubKey, nextOwner: Ripemd160) {
         //authorize the transfer of ownership
         assert(
             hash160(currentOwner) == this.ownerPkh,
@@ -37,11 +46,17 @@ export class SptNft extends SmartContract {
             'signature verification failed'
         )
 
-        // this.ownerPkh = newOwner
+        //ensure we know who next owner is
+        this.ownerPkh = nextOwner
+
+        //assert that next owner must be issuer if token is non-transferrable
+        if (!this.isTransferrable) {
+            assert(this.ownerPkh == this.redemptionPubKeyHash)
+        }
+
         const outputs: ByteString = this.buildStateOutput(this.ctx.utxo.value) //note that we explicitly preserve the amount locked sats
 
-        // outputs += this.buildChangeOutput()
-
+        // this.debug.diffOutputs(outputs)
         assert(
             this.ctx.hashOutputs == hash256(outputs),
             'hashOutputs has a mismatch'
