@@ -15,6 +15,163 @@ import {
     findSig,
 } from 'scrypt-ts'
 
+async function transferToken(
+    recipientSpt: SptNft,
+    recipientPubKey: PubKey,
+    issuingTxn: bsv.Transaction,
+    recipientKey: bsv.PrivateKey
+) {
+    const { tx: callTx, atInputIndex } = await recipientSpt.methods.transfer(
+        (signatureResponse: SignatureResponse[]) => signatureResponse[0].sig,
+        recipientPubKey,
+        {
+            fromUTXO: utxoFromOutput(issuingTxn, 0), //recipient spends from the issuing UTXO
+            changeAddress: recipientKey.publicKey.toAddress(),
+            next: {
+                instance: recipientSpt,
+                balance: 100,
+            },
+        } as MethodCallOptions<SptNft>
+    )
+    return { callTx, atInputIndex }
+}
+
+/***
+ * Issues and transfers a token from Issuer to Recipient
+ *
+ * @param issuerPkh - issuer pubkey hash (hash160)
+ * @param issuerKey - issuer private key
+ * @param issuingSigner - Issuer's signing-wallet provider
+ * @param recipientPkh - recipient pubkey hash (hash160)
+ * @param recipientSigner - Recipient's signing-wallet provider
+ * @param recipientKey - recipient private key
+ */
+async function issueAndTransferToken(
+    issuerPkh: Ripemd160,
+    issuerKey: bsv.PrivateKey,
+    issuingSigner: TestWallet,
+    recipientPkh: Ripemd160,
+    recipientSigner: TestWallet,
+    recipientKey: bsv.PrivateKey
+) {
+    //initial nft creation
+    //when creating at first, recipient owns it, issuer can redeem
+    //we don't need to sign this because we are not broadcasting it
+    const issuingSpt = new SptNft(recipientPkh, issuerPkh)
+    await issuingSpt.connect(issuingSigner)
+
+    //create a deployment Txn and spend change back to issuer
+    const fundingUtxo = getDummyUTXO(10000)
+    const issuingTxn = await issuingSpt.buildDeployTransaction(
+        [fundingUtxo],
+        100, //lock 100 sats in the NFT
+        issuerKey.publicKey.toAddress()
+    )
+
+    //get the instance of the contract that belongs to Recipient
+    const recipientSpt = issuingSpt.next()
+    recipientSpt.ownerPkh = recipientPkh //explicitly update/mutate the next iteration of the Txn to set Bob as owner
+    await recipientSpt.connect(recipientSigner)
+    const recipientPubKey = PubKey(recipientKey.publicKey.toHex())
+
+    //now recipient transfers back to issuer from the deployment transaction
+    const { callTx, atInputIndex } = await transferToken(
+        recipientSpt,
+        recipientPubKey,
+        issuingTxn,
+        recipientKey
+    )
+
+    return {
+        tokenHoldingTx: callTx,
+        atInputIndex,
+        tokenHoldingSpt: recipientSpt,
+    }
+}
+
+/***
+ * Redeem the NFT by spending it from token holder back to the issuer. This would in practice
+ * occur as two steps
+ *       1. token owner signs and passes tx to issuer,
+ *       2. issuer takes partially signed tx and signs as well.
+ *
+ * However for testing purposes we combine these keys into one wallet (DON'T DO THIS IN PROD )
+ *
+ * @param redemptionSigner - A signing wallet holding both private keys of issuer and token holder
+ * @param issuerKey  - Private key of issuer
+ * @param tokenHoldingSpt - A contract instance with current token ownership
+ * @param tokenOwnerPkh - The token owner's pubkeyhash
+ * @param tokenHoldingTx - The bsv.Transaction containing the token
+ * @param tokenOwnerKey - The private key of the token owner
+ */
+async function redeemNft(
+    redemptionSigner: TestWallet,
+    issuerKey: bsv.PrivateKey,
+    tokenHoldingSpt: SptNft,
+    tokenOwnerPkh: Ripemd160,
+    tokenHoldingTx: bsv.Transaction,
+    tokenOwnerKey: bsv.PrivateKey
+) {
+    const redemptionSpt = tokenHoldingSpt.next()
+    redemptionSpt.ownerPkh = tokenOwnerPkh //token still belongs to Bob.
+    await redemptionSpt.connect(redemptionSigner)
+    const issuerPubKey = PubKey(issuerKey.publicKey.toHex())
+
+    //grab the UTXO of the NFT
+    const ownerNftUtxo = utxoFromOutput(tokenHoldingTx, 0)
+
+    //get the redemption transaction
+    const redemptionTxn = await redemptionSpt.buildDeployTransaction(
+        [ownerNftUtxo], //funding source is still a P2PKH, but Bob's UTXO is included in the set now
+        100,
+        tokenOwnerKey.publicKey.toAddress()
+    )
+
+    /**
+     * the following is a bit involved. Multiple signatures, in unlock script require some fancy footwork
+     * between MethodCallOptions.pubKeyOrAddrToSign and a utility method called findSig()
+     */
+    const { tx: redemptionCallTx, atInputIndex } =
+        await redemptionSpt.methods.redeem(
+            (signatureResponse) =>
+                findSig(
+                    signatureResponse,
+                    tokenOwnerKey.publicKey,
+                    SignatureHashType.SINGLE
+                ),
+            PubKey(tokenOwnerKey.publicKey.toHex()),
+            (signatureResponse) =>
+                findSig(
+                    signatureResponse,
+                    issuerKey.publicKey,
+                    SignatureHashType.SINGLE
+                ),
+            issuerPubKey,
+            {
+                fromUTXO: utxoFromOutput(redemptionTxn, 0),
+                changeAddress: tokenOwnerKey.publicKey.toAddress(),
+                pubKeyOrAddrToSign: [
+                    {
+                        pubKeyOrAddr: tokenOwnerKey.publicKey,
+                        sigHashType: SignatureHashType.SINGLE,
+                    },
+                    {
+                        pubKeyOrAddr: issuerKey.publicKey,
+                        sigHashType: SignatureHashType.SINGLE,
+                    },
+                ],
+                next: {
+                    instance: redemptionSpt,
+                    balance: 100,
+                },
+            } as MethodCallOptions<SptNft>
+        )
+    const result = redemptionCallTx.verifyScript(atInputIndex)
+    expect(result.success, result.error).to.eq(true)
+
+    return redemptionCallTx
+}
+
 describe('Test SmartContract `SptNft`', () => {
     const aliceWif = 'cQbzzK3rgvPzMqAyzPYFyoJXS8qchTS1Q9ByvWfZt9BdQc36DxzQ'
     const bobWif = 'cMwQqYsDg2jeTdrCrRd7SCB5U5yw6GbTbQGAQemNYJpqLfh1utVB'
@@ -42,170 +199,43 @@ describe('Test SmartContract `SptNft`', () => {
         await SptNft.compile()
     })
 
-    it('should transfer a spt ', async () => {
-        //initial nft creation
-        //when creating at first, bob owns it, issuer can redeem
-        //we don't need to sign this because we are not broadcasting it
-        const issuingSpt = new SptNft(bobPkh, issuerPkh)
-        await issuingSpt.connect(issuingSigner)
-
-        //create a deployment Txn and spend change back to issuer
-        const fundingUtxo = getDummyUTXO(10000)
-        const deployTxn = await issuingSpt.buildDeployTransaction(
-            [fundingUtxo],
-            100,
-            issuerKey.publicKey.toAddress()
+    it('should transfer an SPT ', async () => {
+        const { tokenHoldingTx, atInputIndex } = await issueAndTransferToken(
+            issuerPkh,
+            issuerKey,
+            issuingSigner,
+            bobPkh,
+            bobSigner,
+            bobKey
         )
 
-        // let signedTxn = await issuingSigner.signTransaction(deployTxn)
-        // let issuerSigHex = Buffer.from(signedTxn.getSignature(0).toString()) //grab the signature for input[0]
-
-        // console.log(signedTxn.getSignature(0).toString())
-        // let issuerSig = bsv.crypto.Signature.fromTxFormat(issuerSigHex)
-        // let issuerSig = Sig(signedTxn.getSignature(0).toString())
-
-        // const newSpt = prevInstance.next()
-        // newSpt.transfer(issuerSig, pubKey)
-
-        //get the instance of the contract that belongs to Bob
-        const bobSpt = issuingSpt.next()
-        bobSpt.ownerPkh = bobPkh //explicitly update/mutate the next iteration of the Txn to set Bob as owner
-        await bobSpt.connect(bobSigner)
-        const bobPubKey = PubKey(bobKey.publicKey.toHex())
-
-        //now bob transfers to alice from the deployment transaction
-        const { tx: callTx, atInputIndex } = await bobSpt.methods.transfer(
-            (signatureResponse: SignatureResponse[]) =>
-                signatureResponse[0].sig,
-            bobPubKey,
-            {
-                fromUTXO: utxoFromOutput(deployTxn, 0),
-                changeAddress: bobKey.publicKey.toAddress(),
-                next: {
-                    instance: bobSpt,
-                    balance: 100,
-                },
-            } as MethodCallOptions<SptNft>
-        )
-
-        const result = callTx.verifyScript(atInputIndex)
+        const result = tokenHoldingTx.verifyScript(atInputIndex)
         expect(result.success, result.error).to.eq(true)
     })
 
     it('it should redeem an spt successfully', async () => {
-        console.log("Bob's Address: " + bobKey.publicKey.toAddress().toString())
-        console.log(
-            "Issuer's Address: " + issuerKey.publicKey.toAddress().toString()
-        )
-
-        //initial nft creation
-        //when creating at first, bob owns it, issuer can redeem
-        //we don't need to sign this because we are not broadcasting it
-        const issuingSpt = new SptNft(bobPkh, issuerPkh)
-        await issuingSpt.connect(issuingSigner)
-
-        //create a deployment Txn and spend change back to issuer
-        const fundingUtxo = getDummyUTXO(10000) //FIXME: Bob's funding source should be the issuer. or ANYONE_CAN_PAY protocol?
-        const deployTxn = await issuingSpt.buildDeployTransaction(
-            [fundingUtxo],
-            100,
-            issuerKey.publicKey.toAddress()
-        )
-
-        //get the instance of the contract that belongs to Bob
-        const bobSpt = issuingSpt.next()
-        bobSpt.ownerPkh = bobPkh //explicitly update/mutate the next iteration of the Txn to set Bob as owner
-        await bobSpt.connect(bobSigner)
-        const bobPubKey = PubKey(bobKey.publicKey.toHex())
-
-        //now bob immediately spends the token back to the issuer
-        const bobSpending = async () => {
-            const { tx: callTx, atInputIndex } = await bobSpt.methods.transfer(
-                (signatureResponse: SignatureResponse[]) =>
-                    signatureResponse[0].sig,
-                bobPubKey,
-                {
-                    fromUTXO: utxoFromOutput(deployTxn, 0),
-                    changeAddress: bobKey.publicKey.toAddress(),
-                    next: {
-                        instance: bobSpt,
-                        balance: 100,
-                    },
-                } as MethodCallOptions<SptNft>
+        const { tokenHoldingTx, atInputIndex, tokenHoldingSpt } =
+            await issueAndTransferToken(
+                issuerPkh,
+                issuerKey,
+                issuingSigner,
+                bobPkh,
+                bobSigner,
+                bobKey
             )
 
-            const result = callTx.verifyScript(atInputIndex)
-            expect(result.success, result.error).to.eq(true)
-
-            return callTx
-        }
-
-        const bobSpendingTxn = await bobSpending()
+        const result = tokenHoldingTx.verifyScript(atInputIndex)
+        expect(result.success, result.error).to.eq(true)
 
         //the issuer now spends the token back to themselves to claim the sats
-
-        const redeemNft = async () => {
-            const redemptionSpt = bobSpt.next()
-            redemptionSpt.ownerPkh = bobPkh //token still belongs to Bob.
-            await redemptionSpt.connect(redemptionSigner)
-            const issuerPubKey = PubKey(issuerKey.publicKey.toHex())
-
-            //grab the UTXO of the NFT belonging to Bob
-            const bobNftUtxo = utxoFromOutput(bobSpendingTxn, 0)
-
-            //get the redemption transaction
-            const redemptionTxn = await redemptionSpt.buildDeployTransaction(
-                [bobNftUtxo], //funding source is still a P2PKH, but Bob's UTXO is included in the set now
-                100,
-                bobKey.publicKey.toAddress()
-            )
-
-            /**
-             * the following is a bit involved. Multiple signatures, in unlock script require some fancy footwork
-             * between MethodCallOptions.pubKeyOrAddrToSign and a utility method called findSig()
-             */
-            const { tx: redemptionCallTx, atInputIndex } =
-                await redemptionSpt.methods.redeem(
-                    (signatureResponse) =>
-                        findSig(
-                            signatureResponse,
-                            bobKey.publicKey,
-                            SignatureHashType.SINGLE
-                        ),
-                    bobPubKey,
-                    (signatureResponse) =>
-                        findSig(
-                            signatureResponse,
-                            issuerKey.publicKey,
-                            SignatureHashType.SINGLE
-                        ),
-                    issuerPubKey,
-                    {
-                        fromUTXO: utxoFromOutput(redemptionTxn, 0),
-                        changeAddress: bobKey.publicKey.toAddress(),
-                        pubKeyOrAddrToSign: [
-                            {
-                                pubKeyOrAddr: bobKey.publicKey,
-                                sigHashType: SignatureHashType.SINGLE,
-                            },
-                            {
-                                pubKeyOrAddr: issuerKey.publicKey,
-                                sigHashType: SignatureHashType.SINGLE,
-                            },
-                        ],
-                        next: {
-                            instance: redemptionSpt,
-                            balance: 100,
-                        },
-                    } as MethodCallOptions<SptNft>
-                )
-            const result = redemptionCallTx.verifyScript(atInputIndex)
-            expect(result.success, result.error).to.eq(true)
-
-            return redemptionCallTx
-        }
-
-        const redemptionTxn = await redeemNft()
+        const redemptionTxn = await redeemNft(
+            redemptionSigner,
+            issuerKey,
+            tokenHoldingSpt,
+            bobPkh,
+            tokenHoldingTx,
+            bobKey
+        )
 
         //assert that the redemption transaction's UTXO now belongs to the issuer
         expect(redemptionTxn.outputs[0].satoshis == 100)
@@ -216,18 +246,29 @@ describe('Test SmartContract `SptNft`', () => {
     })
 
     /*
+    it('should not allow redemption without ownership', async () => {
+
+
+    })
+
+
+    it('should not allow redemption by third party', () => {
+
+    })
+
+    it('should not allow transfer by unauthorised person', () => {
+
+    })
+
+    /*
     it('should allow the issuer to pay for redemption cost', () => {
     })
 
     it('should allow the holder to fund their lateral token transfer using specifial owner-locked, fungible redemption-tokens', () => {})
 
-    it('should not allow redemption without ownership', async () => {})
 
     it('should allow issuer to disable third-party transfer. I.e. immediate redemption only', async () => {})
 
-    it('should not allow redemption by third party', () => {})
-
-    it('should not allow transfer by unauthorised person', () => {})
 
      */
 })
