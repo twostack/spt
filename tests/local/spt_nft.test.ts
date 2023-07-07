@@ -1,4 +1,4 @@
-import { expect } from 'chai'
+import { expect, use } from 'chai'
 import { SptNft } from '../../src/contracts/spt_NFT'
 import { getDummyUTXO } from '../utils/txHelper'
 import {
@@ -14,18 +14,20 @@ import {
     SignatureHashType,
     findSig,
 } from 'scrypt-ts'
+import chaiAsPromised from 'chai-as-promised'
+use(chaiAsPromised)
 
 async function transferToken(
     recipientSpt: SptNft,
     recipientPubKey: PubKey,
-    issuingTxn: bsv.Transaction,
-    recipientKey: bsv.PrivateKey
+    recipientKey: bsv.PrivateKey,
+    tokenHoldingTx: bsv.Transaction
 ) {
     const { tx: callTx, atInputIndex } = await recipientSpt.methods.transfer(
         (signatureResponse: SignatureResponse[]) => signatureResponse[0].sig,
         recipientPubKey,
         {
-            fromUTXO: utxoFromOutput(issuingTxn, 0), //recipient spends from the issuing UTXO
+            fromUTXO: utxoFromOutput(tokenHoldingTx, 0), //recipient spends from the issuing UTXO
             changeAddress: recipientKey.publicKey.toAddress(),
             next: {
                 instance: recipientSpt,
@@ -78,8 +80,8 @@ async function issueAndTransferToken(
     const { callTx, atInputIndex } = await transferToken(
         recipientSpt,
         recipientPubKey,
-        issuingTxn,
-        recipientKey
+        recipientKey,
+        issuingTxn
     )
 
     return {
@@ -245,20 +247,79 @@ describe('Test SmartContract `SptNft`', () => {
         expect(redemptionTxn.outputs[0].script.toHex() == redeemerScript)
     })
 
-    /*
-    it('should not allow redemption without ownership', async () => {
+    it('should not allow transfer by unauthorised person', async () => {
+        //issue a token to Bob
+        const getBobsToken = async () => {
+            const { tokenHoldingTx, atInputIndex, tokenHoldingSpt } =
+                await issueAndTransferToken(
+                    issuerPkh,
+                    issuerKey,
+                    issuingSigner,
+                    bobPkh,
+                    bobSigner,
+                    bobKey
+                )
 
+            const result = tokenHoldingTx.verifyScript(atInputIndex)
+            expect(result.success, result.error).to.eq(true)
 
+            return { tokenHoldingTx, tokenHoldingSpt }
+        }
+
+        const { tokenHoldingTx, tokenHoldingSpt } = await getBobsToken()
+
+        //alice attempts to transfer bob's token to herself
+        return expect(
+            transferToken(
+                tokenHoldingSpt,
+                PubKey(aliceKey.publicKey.toHex()),
+                aliceKey,
+                tokenHoldingTx
+            )
+        ).to.be.rejectedWith(/owner pubkeyhash does not match/)
     })
+
+    it('should not allow redemption without ownership', async () => {
+        const issueToken = async () => {
+            const { tokenHoldingTx, atInputIndex, tokenHoldingSpt } =
+                await issueAndTransferToken(
+                    issuerPkh,
+                    issuerKey,
+                    issuingSigner,
+                    bobPkh,
+                    bobSigner,
+                    bobKey
+                )
+
+            const result = tokenHoldingTx.verifyScript(atInputIndex)
+            expect(result.success, result.error).to.eq(true)
+
+            return { tokenHoldingTx, tokenHoldingSpt }
+        }
+
+        const { tokenHoldingTx, tokenHoldingSpt } = await issueToken()
+
+        //bob own's the token. alice tries to redeem.
+        const aliceSpt = new SptNft(alicePkh, issuerPkh)
+
+        return expect(
+            redeemNft(
+                redemptionSigner,
+                issuerKey,
+                aliceSpt,
+                alicePkh,
+                tokenHoldingTx,
+                aliceKey
+            )
+        ).to.be.rejectedWith(Error)
+    })
+    /*
 
 
     it('should not allow redemption by third party', () => {
 
     })
 
-    it('should not allow transfer by unauthorised person', () => {
-
-    })
 
     /*
     it('should allow the issuer to pay for redemption cost', () => {

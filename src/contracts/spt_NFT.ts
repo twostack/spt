@@ -56,11 +56,23 @@ export class SptNft extends SmartContract {
         redeemerPubKey: PubKey
     ) {
         //redeemer agrees
-        assert(hash160(redeemerPubKey) == this.redemptionPubKeyHash)
-        assert(this.checkSig(redeemerSig, redeemerPubKey))
+        assert(
+            hash160(redeemerPubKey) == this.redemptionPubKeyHash,
+            'issuer public key does not match'
+        )
+        assert(
+            this.checkSig(redeemerSig, redeemerPubKey),
+            'issuer signature is invalid'
+        )
 
         //owner agrees
-        assert(hash160(ownerPubKey) == this.ownerPkh)
-        assert(this.checkSig(ownerSig, ownerPubKey))
+        assert(
+            hash160(ownerPubKey) == this.ownerPkh,
+            'token owner public key does not match'
+        )
+        assert(
+            this.checkSig(ownerSig, ownerPubKey),
+            'token owner signature is invalid'
+        )
     }
 }
