@@ -13,6 +13,9 @@ import {
     utxoFromOutput,
     SignatureHashType,
     findSig,
+    toByteString,
+    toHex,
+    ByteString,
 } from 'scrypt-ts'
 import chaiAsPromised from 'chai-as-promised'
 
@@ -69,12 +72,18 @@ describe('Test SmartContract `SptNft`', () => {
         recipientPkh: Ripemd160,
         issuerPkh: Ripemd160,
         issuerKey: bsv.PrivateKey,
-        transferrable: boolean
+        transferrable: boolean,
+        dataBytes: ByteString
     ) {
         //initial nft creation
         //when creating at first, recipient owns it, issuer can redeem
         //we don't need to sign this because we are not broadcasting it
-        const issuingSpt = new SptNft(recipientPkh, issuerPkh, transferrable)
+        const issuingSpt = new SptNft(
+            recipientPkh,
+            issuerPkh,
+            transferrable,
+            dataBytes
+        )
         await issuingSpt.connect(issuingSigner)
 
         //create a deployment Txn and spend change back to issuer
@@ -103,13 +112,15 @@ describe('Test SmartContract `SptNft`', () => {
         issuingSigner: TestWallet,
         recipientPkh: Ripemd160,
         recipientSigner: TestWallet,
-        recipientKey: bsv.PrivateKey
+        recipientKey: bsv.PrivateKey,
+        dataBytes: ByteString
     ) {
         const { issuingSpt, issuingTxn } = await issueToken(
             recipientPkh,
             issuerPkh,
             issuerKey,
-            true
+            true,
+            dataBytes
         )
         await issuingSpt.connect(bobSigner) //we issued to bob
 
@@ -229,7 +240,8 @@ describe('Test SmartContract `SptNft`', () => {
             issuingSigner,
             bobPkh,
             bobSigner,
-            bobKey
+            bobKey,
+            toByteString('')
         )
 
         const result = tokenHoldingTx.verifyScript(atInputIndex)
@@ -244,7 +256,8 @@ describe('Test SmartContract `SptNft`', () => {
                 issuingSigner,
                 bobPkh,
                 bobSigner,
-                bobKey
+                bobKey,
+                toByteString('')
             )
 
         const result = tokenHoldingTx.verifyScript(atInputIndex)
@@ -262,7 +275,12 @@ describe('Test SmartContract `SptNft`', () => {
 
         //assert that the redemption transaction's UTXO now belongs to the issuer
         expect(redemptionTxn.outputs[0].satoshis == 100)
-        const redeemerScript = new SptNft(issuerPkh, issuerPkh, true)
+        const redeemerScript = new SptNft(
+            issuerPkh,
+            issuerPkh,
+            true,
+            toByteString('')
+        )
             .getStateScript()
             .toString()
         expect(redemptionTxn.outputs[0].script.toHex() == redeemerScript)
@@ -278,7 +296,8 @@ describe('Test SmartContract `SptNft`', () => {
                     issuingSigner,
                     bobPkh,
                     bobSigner,
-                    bobKey
+                    bobKey,
+                    toByteString('')
                 )
 
             const result = tokenHoldingTx.verifyScript(atInputIndex)
@@ -313,7 +332,8 @@ describe('Test SmartContract `SptNft`', () => {
                     issuingSigner,
                     bobPkh,
                     bobSigner,
-                    bobKey
+                    bobKey,
+                    toByteString('')
                 )
 
             const result = tokenHoldingTx.verifyScript(atInputIndex)
@@ -325,7 +345,7 @@ describe('Test SmartContract `SptNft`', () => {
         const { tokenHoldingTx, tokenHoldingSpt } = await issueToken()
 
         //bob own's the token. alice tries to redeem.
-        const aliceSpt = new SptNft(alicePkh, issuerPkh, true)
+        const aliceSpt = new SptNft(alicePkh, issuerPkh, true, toByteString(''))
 
         return expect(
             redeemNft(
@@ -344,7 +364,8 @@ describe('Test SmartContract `SptNft`', () => {
             bobPkh,
             issuerPkh,
             issuerKey,
-            false
+            false,
+            toByteString('')
         )
         await issuingSpt.connect(bobSigner) //bob currently owns the issued token
 
@@ -371,7 +392,8 @@ describe('Test SmartContract `SptNft`', () => {
             bobPkh,
             issuerPkh,
             issuerKey,
-            false
+            false,
+            toByteString('')
         )
         await issuingSpt.connect(bobSigner) //bob currently owns the issued token
 
@@ -397,7 +419,8 @@ describe('Test SmartContract `SptNft`', () => {
             bobPkh,
             issuerPkh,
             issuerKey,
-            true
+            true,
+            toByteString('')
         )
         await issuingSpt.connect(bobSigner) //bob currently owns the issued token
 
@@ -417,5 +440,23 @@ describe('Test SmartContract `SptNft`', () => {
 
         const result = callTx.verifyScript(atInputIndex)
         expect(result.success, result.error).to.eq(true)
+    })
+
+    it('can specify arbitrary data to an NFT', async () => {
+        const dataBytes = toByteString(
+            'the lazy dog jumps over the quick brown fox',
+            true
+        )
+
+        //issue the token
+        const { issuingSpt, issuingTxn } = await issueToken(
+            bobPkh,
+            issuerPkh,
+            issuerKey,
+            true,
+            dataBytes
+        )
+
+        expect(issuingSpt.dataPart.toHex()).to.contain(dataBytes.toString())
     })
 })

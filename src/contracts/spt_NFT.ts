@@ -14,24 +14,45 @@ import {
 } from 'scrypt-ts'
 
 export class SptNft extends SmartContract {
+    /**
+     * Public Key Hash of the current token owner.
+     * This is the PKH of whoever is allowed to transfer this token
+     * under the conditions set by the issuer.
+     */
     @prop(true)
     ownerPkh: PubKeyHash
 
+    /**
+     * Public Key Hash of whoever may redeem this token.
+     * Typically this would be the issuer.
+     */
     @prop(true)
     redemptionPubKeyHash: PubKeyHash
 
+    /**
+     * If true, token can be transferred to a third-party.
+     * If false, token can only be transferred back to issuer after issuance.
+     */
     @prop(true)
     isTransferrable: boolean
+
+    /***
+     * arbitrary data to be specified in token
+     */
+    @prop(true)
+    dataBytes: ByteString
 
     constructor(
         ownerPkh: PubKeyHash,
         redemptionPkh: PubKeyHash,
-        transferrable: boolean
+        transferrable: boolean,
+        dataBytes: ByteString
     ) {
         super(...arguments)
         this.ownerPkh = ownerPkh
         this.redemptionPubKeyHash = redemptionPkh
         this.isTransferrable = transferrable
+        this.dataBytes = dataBytes
     }
 
     @method(SigHash.SINGLE)
